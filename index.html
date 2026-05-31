@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GONKI — гонки без правил</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game-canvas"></canvas>
+
+      <!-- HUD -->
+      <div id="hud" class="hidden">
+        <div class="hud-top-left">
+          <div id="position" class="badge"><span class="big" id="pos-current">1</span><span class="sep">/</span><span id="pos-total">4</span><div class="label">ПОЗИЦИЯ</div></div>
+          <div id="lap" class="badge"><span class="big" id="lap-current">1</span><span class="sep">/</span><span id="lap-total">3</span><div class="label">КРУГ</div></div>
+        </div>
+
+        <div class="hud-top-right">
+          <div id="timer" class="badge"><span class="big" id="time-value">00:00.00</span><div class="label">ВРЕМЯ</div></div>
+          <div id="best" class="badge"><span class="mid" id="best-value">--:--.--</span><div class="label">ЛУЧШИЙ КРУГ</div></div>
+        </div>
+
+        <div class="hud-bottom-right">
+          <div id="speedo">
+            <canvas id="speedo-canvas" width="220" height="220"></canvas>
+          </div>
+        </div>
+
+        <div class="hud-bottom-left">
+          <canvas id="minimap-canvas" width="200" height="200"></canvas>
+        </div>
+
+        <div id="center-message" class="hidden"></div>
+      </div>
+
+      <!-- Start screen -->
+      <div id="start-screen">
+        <div class="panel">
+          <h1>GONKI</h1>
+          <p class="tagline">3D-гонки без правил. Тарань, сбивай, побеждай.</p>
+          <div class="controls-help">
+            <div><kbd>W</kbd> / <kbd>↑</kbd> — газ</div>
+            <div><kbd>S</kbd> / <kbd>↓</kbd> — тормоз / задний ход</div>
+            <div><kbd>A</kbd> <kbd>D</kbd> / <kbd>←</kbd> <kbd>→</kbd> — руль</div>
+            <div><kbd>Space</kbd> — ручник (дрифт)</div>
+            <div><kbd>R</kbd> — перевернуть машину</div>
+            <div><kbd>C</kbd> — сменить камеру</div>
+          </div>
+          <button id="start-btn">СТАРТ ГОНКИ</button>
+          <p class="hint">3 круга · 3 соперника-бота · полный контактный режим</p>
+        </div>
+      </div>
+
+      <!-- Finish screen -->
+      <div id="finish-screen" class="hidden">
+        <div class="panel">
+          <h1 id="finish-title">ФИНИШ</h1>
+          <div id="results"></div>
+          <button id="restart-btn">ГОНКА ЗАНОВО</button>
+        </div>
+      </div>
+
+      <div id="loading">Загрузка трассы…</div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
