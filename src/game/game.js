@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Track, TOTAL_LAPS } from "./track.js";
 import { Car } from "./car.js";
 import { AIDriver } from "./ai.js";
@@ -7,9 +8,9 @@ import { Controls } from "./controls.js";
 import { HUD } from "./hud.js";
 
 const BOT_CONFIG = [
-  { name: "VIPER", color: 0x00e5ff, speedFactor: 1.0, aggression: 0.5, lookahead: 0.022 },
-  { name: "BLAZE", color: 0xffd23f, speedFactor: 0.97, aggression: 0.7, lookahead: 0.02 },
-  { name: "GHOST", color: 0xb066ff, speedFactor: 1.02, aggression: 0.3, lookahead: 0.024 },
+  { name: "VIPER", color: 0x00e5ff, speedFactor: 1.0, aggression: 0.35, lookahead: 0.024 },
+  { name: "BLAZE", color: 0xffd23f, speedFactor: 0.96, aggression: 0.5, lookahead: 0.022 },
+  { name: "GHOST", color: 0xb066ff, speedFactor: 1.03, aggression: 0.2, lookahead: 0.026 },
 ];
 
 const CAMERA_MODES = ["chase", "far", "hood"];
@@ -33,18 +34,37 @@ export class Game {
   }
 
   _initRenderer() {
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: this.canvas,
+      antialias: true,
+      powerPreference: "high-performance",
+    });
+
+    // Detect software / very weak GPUs and scale quality down so the game
+    // stays playable. Real GPUs keep full resolution, shadows and reflections.
+    this.lowPerf = detectLowPerf(this.renderer);
+    this._pixelRatio = this.lowPerf ? 0.6 : Math.min(window.devicePixelRatio, 2);
+
+    this.renderer.setPixelRatio(this._pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.enabled = !this.lowPerf;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
   }
 
   _initScene() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x9ec5e8);
-    this.scene.fog = new THREE.Fog(0x9ec5e8, 250, 700);
+    this.scene.background = makeSkyTexture();
+    this.scene.fog = new THREE.Fog(0xaecbe6, 280, 760);
+
+    // Image-based lighting for realistic metal/glass reflections on the cars.
+    // Skipped on low-perf devices (extra per-fragment cost on software renderers).
+    if (!this.lowPerf) {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    }
 
     this.camera = new THREE.PerspectiveCamera(
       62,
@@ -57,18 +77,21 @@ export class Game {
     const hemi = new THREE.HemisphereLight(0xbdd7ff, 0x44502f, 0.9);
     this.scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfff4e0, 1.4);
-    sun.position.set(120, 200, 80);
-    sun.castShadow = true;
+    const sun = new THREE.DirectionalLight(0xfff4e0, 2.0);
+    sun.position.set(180, 280, 140);
+    sun.castShadow = !this.lowPerf;
     sun.shadow.mapSize.set(2048, 2048);
-    const d = 220;
+    // Fixed shadow frustum covering the whole circuit → no per-frame churn.
+    const d = 260;
     sun.shadow.camera.left = -d;
     sun.shadow.camera.right = d;
     sun.shadow.camera.top = d;
     sun.shadow.camera.bottom = -d;
     sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 600;
+    sun.shadow.camera.far = 800;
     sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.02;
+    sun.target.position.set(0, 0, 0);
     this.scene.add(sun);
     this.scene.add(sun.target);
     this.sun = sun;
@@ -191,6 +214,7 @@ export class Game {
   _onResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    this.renderer.setPixelRatio(this._pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }
 
@@ -260,14 +284,12 @@ export class Game {
       look.copy(pos).addScaledVector(fwd, 20).add(new THREE.Vector3(0, 1.2, 0));
     }
 
-    const lerp = 1 - Math.pow(0.001, dt);
-    this.camera.position.lerp(desired, Math.min(lerp * 1.4, 1));
-    this._camTarget.lerp(look, Math.min(lerp * 1.6, 1));
+    // Critically-damped follow keeps the camera smooth without jitter.
+    const posLerp = 1 - Math.pow(0.0001, dt);
+    const lookLerp = 1 - Math.pow(0.00001, dt);
+    this.camera.position.lerp(desired, Math.min(posLerp, 1));
+    this._camTarget.lerp(look, Math.min(lookLerp, 1));
     this.camera.lookAt(this._camTarget);
-
-    // Keep the sun shadow centered on the player.
-    this.sun.position.set(pos.x + 120, 200, pos.z + 80);
-    this.sun.target.position.set(pos.x, 0, pos.z);
   }
 
   _showFinish() {
@@ -377,5 +399,53 @@ export class Game {
     if (dt > 0) this._step(dt);
     this._updateCamera(Math.max(dt, 0.0001));
     this.renderer.render(this.scene, this.camera);
+    this._adaptQuality(dt);
   }
+
+  // One-shot safety net: if the first couple seconds run poorly on a device we
+  // didn't flag as low-perf, drop resolution and shadows so it's still smooth.
+  _adaptQuality(dt) {
+    if (this._qualityChecked) return;
+    this._fpsFrames = (this._fpsFrames || 0) + 1;
+    this._fpsAccum = (this._fpsAccum || 0) + dt;
+    if (this._fpsAccum < 2.5) return;
+    const fps = this._fpsFrames / this._fpsAccum;
+    if (fps < 24 && this._pixelRatio > 0.6) {
+      this._pixelRatio = 0.6;
+      this.renderer.setPixelRatio(0.6);
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.renderer.shadowMap.enabled = false;
+      this.sun.castShadow = false;
+    }
+    this._qualityChecked = true;
+  }
+}
+
+function detectLowPerf(renderer) {
+  try {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const name = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "";
+    return /swiftshader|llvmpipe|software|basic render/i.test(name);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Vertical gradient sky used as the scene background.
+function makeSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 256;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.0, "#2a6cc4");
+  grad.addColorStop(0.45, "#6fa8dc");
+  grad.addColorStop(0.75, "#bcd6ee");
+  grad.addColorStop(1.0, "#dfeaf5");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 16, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }

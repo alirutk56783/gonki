@@ -41,9 +41,10 @@ export class Controls {
     if (backward) throttle -= 1;
     if (left) steer += 1;
     if (right) steer -= 1;
-    if (this.has(" ")) brake = 1; // handbrake
 
-    return { throttle, steer, brake };
+    const handbrake = this.has(" ");
+
+    return { throttle, steer, brake, handbrake };
   }
 
   consumeReset() {

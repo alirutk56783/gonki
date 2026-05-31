@@ -1,8 +1,12 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 
-const CHASSIS = { width: 1.8, height: 0.7, length: 4.0 };
+const CHASSIS = { width: 1.9, height: 0.55, length: 4.2 };
 const WHEEL_RADIUS = 0.5;
+const WHEEL_WIDTH = 0.4;
+
+const DIR_LOCAL = new THREE.Vector3(0, -1, 0);
+const AXLE_LOCAL = new THREE.Vector3(-1, 0, 0);
 
 export class Car {
   constructor(scene, world, materials, options = {}) {
@@ -13,83 +17,152 @@ export class Car {
     this.isPlayer = options.isPlayer ?? false;
 
     // Tuning
-    this.maxEngineForce = options.maxEngineForce ?? 2200;
-    this.maxBrakeForce = 45;
-    this.maxSteer = 0.55;
+    this.maxEngineForce = options.maxEngineForce ?? 2600;
+    this.maxBrakeForce = 60;
+    this.maxSteer = 0.62;
+    this.frontGrip = 3.2;
+    this.rearGrip = 2.9;
+    this.driftGrip = 0.45;
 
-    this._buildMesh();
     this._buildVehicle(materials);
+    this._buildMesh();
 
     // Race state
     this.lap = 0;
-    this.progress = 0; // normalized [0,1)
+    this.progress = 0;
     this.lastProgress = 0;
-    this.rankProgress = 0; // lap + progress, for sorting
+    this.rankProgress = 0;
     this.finished = false;
     this.finishTime = null;
     this.lapTimes = [];
-    this.lastLapStamp = 0;
     this.bestLap = null;
+  }
+
+  _carMaterials() {
+    return {
+      paint: new THREE.MeshStandardMaterial({
+        color: this.color,
+        roughness: 0.3,
+        metalness: 0.7,
+        envMapIntensity: 1.2,
+      }),
+      dark: new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.5, metalness: 0.4 }),
+      glass: new THREE.MeshStandardMaterial({
+        color: 0x10141c,
+        roughness: 0.08,
+        metalness: 0.9,
+        envMapIntensity: 1.6,
+      }),
+      chrome: new THREE.MeshStandardMaterial({ color: 0xdfe6ee, roughness: 0.18, metalness: 1.0, envMapIntensity: 1.5 }),
+      head: new THREE.MeshStandardMaterial({ color: 0xfff6d0, emissive: 0xfff0b0, emissiveIntensity: 1.4 }),
+      tail: new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1010, emissiveIntensity: 1.2 }),
+    };
   }
 
   _buildMesh() {
     const g = new THREE.Group();
+    const m = this._carMaterials();
+    const W = CHASSIS.width;
+    const L = CHASSIS.length;
 
-    const bodyMat = new THREE.MeshStandardMaterial({ color: this.color, roughness: 0.35, metalness: 0.5 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x16181d, roughness: 0.5, metalness: 0.3 });
-    const glassMat = new THREE.MeshStandardMaterial({ color: 0x3a4a5a, roughness: 0.1, metalness: 0.6 });
+    // Lower body (slightly tapered using a beveled box look via two stacked boxes).
+    const lower = new THREE.Mesh(new THREE.BoxGeometry(W, 0.45, L), m.paint);
+    lower.position.y = 0.0;
+    lower.castShadow = true;
+    g.add(lower);
 
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(CHASSIS.width, CHASSIS.height, CHASSIS.length),
-      bodyMat
-    );
-    body.castShadow = true;
-    body.position.y = 0.1;
-    g.add(body);
+    // Hood / trunk shaping with a thinner top layer.
+    const mid = new THREE.Mesh(new THREE.BoxGeometry(W * 0.96, 0.3, L * 0.92), m.paint);
+    mid.position.y = 0.34;
+    mid.castShadow = true;
+    g.add(mid);
 
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(CHASSIS.width * 0.85, 0.55, CHASSIS.length * 0.45),
-      glassMat
-    );
-    cabin.position.set(0, 0.55, -0.15);
+    // Cabin (greenhouse) — narrower, set back, with glass.
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, 0.5, L * 0.4), m.paint);
+    cabin.position.set(0, 0.62, -0.25);
     cabin.castShadow = true;
     g.add(cabin);
 
-    // Spoiler
-    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(CHASSIS.width, 0.08, 0.4), darkMat);
-    spoiler.position.set(0, 0.5, -CHASSIS.length / 2 + 0.1);
-    g.add(spoiler);
+    const windshield = new THREE.Mesh(new THREE.BoxGeometry(W * 0.78, 0.42, 0.12), m.glass);
+    windshield.position.set(0, 0.66, L * 0.4 * 0.5 - 0.25);
+    windshield.rotation.x = -0.5;
+    g.add(windshield);
+
+    const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(W * 0.78, 0.4, 0.12), m.glass);
+    rearGlass.position.set(0, 0.66, -L * 0.4 * 0.5 - 0.25);
+    rearGlass.rotation.x = 0.6;
+    g.add(rearGlass);
+
     for (const sx of [-1, 1]) {
-      const stand = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.3, 0.1), darkMat);
-      stand.position.set(sx * 0.7, 0.35, -CHASSIS.length / 2 + 0.1);
+      const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.36, L * 0.34), m.glass);
+      sideGlass.position.set(sx * W * 0.41, 0.66, -0.25);
+      g.add(sideGlass);
+    }
+
+    // Rear wing
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(W * 0.95, 0.08, 0.45), m.dark);
+    wing.position.set(0, 0.7, -L / 2 + 0.15);
+    g.add(wing);
+    for (const sx of [-1, 1]) {
+      const stand = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.28, 0.12), m.dark);
+      stand.position.set(sx * W * 0.35, 0.52, -L / 2 + 0.15);
       g.add(stand);
     }
 
-    // Headlights
-    const lightMat = new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xfff2c0, emissiveIntensity: 1.2 });
+    // Front splitter + rear diffuser
+    const splitter = new THREE.Mesh(new THREE.BoxGeometry(W, 0.06, 0.4), m.dark);
+    splitter.position.set(0, -0.2, L / 2 - 0.1);
+    g.add(splitter);
+    const diffuser = new THREE.Mesh(new THREE.BoxGeometry(W, 0.06, 0.4), m.dark);
+    diffuser.position.set(0, -0.2, -L / 2 + 0.1);
+    g.add(diffuser);
+
+    // Side skirts
     for (const sx of [-1, 1]) {
-      const hl = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.05), lightMat);
-      hl.position.set(sx * 0.55, 0.1, CHASSIS.length / 2 - 0.02);
+      const skirt = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, L * 0.7), m.dark);
+      skirt.position.set(sx * W * 0.5, -0.18, 0);
+      g.add(skirt);
+    }
+
+    // Headlights & taillights
+    for (const sx of [-1, 1]) {
+      const hl = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.18, 0.06), m.head);
+      hl.position.set(sx * 0.5, 0.12, L / 2 - 0.02);
       g.add(hl);
+      const tl = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.06), m.tail);
+      tl.position.set(sx * 0.45, 0.16, -L / 2 + 0.02);
+      g.add(tl);
+    }
+
+    // Side mirrors
+    for (const sx of [-1, 1]) {
+      const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.1), m.dark);
+      mirror.position.set(sx * (W * 0.5 + 0.05), 0.62, 0.5);
+      g.add(mirror);
     }
 
     this.mesh = g;
     this.scene.add(g);
 
-    // Wheel meshes
-    const wheelGeo = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.4, 18);
-    wheelGeo.rotateZ(Math.PI / 2);
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.8 });
-    const hubMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3, metalness: 0.8 });
+    // Wheels as children of the chassis group so they follow it perfectly
+    // (smooth, no interpolation mismatch).
+    const tireGeo = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 20);
+    tireGeo.rotateZ(Math.PI / 2);
+    const rimGeo = new THREE.CylinderGeometry(WHEEL_RADIUS * 0.55, WHEEL_RADIUS * 0.55, WHEEL_WIDTH + 0.02, 12);
+    rimGeo.rotateZ(Math.PI / 2);
+    const spokeGeo = new THREE.BoxGeometry(WHEEL_WIDTH + 0.04, 0.08, WHEEL_RADIUS * 0.9);
+
     this.wheelMeshes = [];
     for (let i = 0; i < 4; i++) {
       const wg = new THREE.Group();
-      const tire = new THREE.Mesh(wheelGeo, wheelMat);
+      const tire = new THREE.Mesh(tireGeo, m.dark);
       tire.castShadow = true;
-      const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.42, 10), hubMat);
-      hub.rotateZ(Math.PI / 2);
-      wg.add(tire, hub);
-      this.scene.add(wg);
+      const rim = new THREE.Mesh(rimGeo, m.chrome);
+      const spoke1 = new THREE.Mesh(spokeGeo, m.chrome);
+      const spoke2 = spoke1.clone();
+      spoke2.rotation.x = Math.PI / 2;
+      wg.add(tire, rim, spoke1, spoke2);
+      this.mesh.add(wg);
       this.wheelMeshes.push(wg);
     }
   }
@@ -98,10 +171,10 @@ export class Car {
     const chassisShape = new CANNON.Box(
       new CANNON.Vec3(CHASSIS.width / 2, CHASSIS.height / 2, CHASSIS.length / 2)
     );
-    const body = new CANNON.Body({ mass: 250, material: materials.car });
-    // Lower the center of mass for stability.
-    body.addShape(chassisShape, new CANNON.Vec3(0, 0, 0));
-    body.angularDamping = 0.4;
+    const body = new CANNON.Body({ mass: 230, material: materials.car });
+    // Shape offset upward lowers the center of mass → less rollover, better grip.
+    body.addShape(chassisShape, new CANNON.Vec3(0, 0.25, 0));
+    body.angularDamping = 0.25;
     this.chassisBody = body;
 
     const vehicle = new CANNON.RaycastVehicle({
@@ -114,23 +187,23 @@ export class Car {
     const opt = {
       radius: WHEEL_RADIUS,
       directionLocal: new CANNON.Vec3(0, -1, 0),
-      suspensionStiffness: 32,
-      suspensionRestLength: 0.35,
-      frictionSlip: 2.2,
+      suspensionStiffness: 34,
+      suspensionRestLength: 0.32,
+      frictionSlip: this.frontGrip,
       dampingRelaxation: 2.4,
-      dampingCompression: 4.6,
+      dampingCompression: 4.4,
       maxSuspensionForce: 100000,
-      rollInfluence: 0.02,
+      rollInfluence: 0.03,
       axleLocal: new CANNON.Vec3(-1, 0, 0),
       chassisConnectionPointLocal: new CANNON.Vec3(),
-      maxSuspensionTravel: 0.35,
+      maxSuspensionTravel: 0.3,
       customSlidingRotationalSpeed: -30,
       useCustomSlidingRotationalSpeed: true,
     };
 
-    const cw = CHASSIS.width / 2 + 0.05;
-    const cf = CHASSIS.length / 2 - 0.6;
-    const cy = -0.1;
+    const cw = CHASSIS.width / 2 + 0.06;
+    const cf = CHASSIS.length / 2 - 0.65;
+    const cy = 0.0;
     const positions = [
       [cw, cy, cf], // 0 front-right
       [-cw, cy, cf], // 1 front-left
@@ -144,31 +217,59 @@ export class Car {
 
     vehicle.addToWorld(this.world);
     this.vehicle = vehicle;
+
+    // Per-wheel grip (front a touch more than rear → eager turn-in, drift-friendly).
+    vehicle.wheelInfos[0].frictionSlip = this.frontGrip;
+    vehicle.wheelInfos[1].frictionSlip = this.frontGrip;
+    vehicle.wheelInfos[2].frictionSlip = this.rearGrip;
+    vehicle.wheelInfos[3].frictionSlip = this.rearGrip;
   }
 
   placeAt(position, angle) {
-    this.chassisBody.position.set(position.x, position.y, position.z);
-    this.chassisBody.quaternion.setFromEuler(0, angle, 0);
-    this.chassisBody.velocity.set(0, 0, 0);
-    this.chassisBody.angularVelocity.set(0, 0, 0);
-    this.chassisBody.initPosition.copy(this.chassisBody.position);
-    this.chassisBody.initQuaternion.copy(this.chassisBody.quaternion);
+    const b = this.chassisBody;
+    b.position.set(position.x, position.y, position.z);
+    b.quaternion.setFromEuler(0, angle, 0);
+    b.velocity.set(0, 0, 0);
+    b.angularVelocity.set(0, 0, 0);
+    b.initPosition.copy(b.position);
+    b.initQuaternion.copy(b.quaternion);
+    b.interpolatedPosition.copy(b.position);
+    b.interpolatedQuaternion.copy(b.quaternion);
+    this._lastYaw = angle;
   }
 
-  // controls: { throttle: -1..1, steer: -1..1, brake: 0..1 }
+  // controls: { throttle: -1..1, steer: -1..1, brake: 0..1, handbrake: bool }
   applyControls(controls) {
-    const { throttle = 0, steer = 0, brake = 0 } = controls;
+    const { throttle = 0, steer = 0, brake = 0, handbrake = false } = controls;
+
     const force = -throttle * this.maxEngineForce;
-    // Rear-wheel drive (wheels 2 and 3)
     this.vehicle.applyEngineForce(force, 2);
     this.vehicle.applyEngineForce(force, 3);
-    // Steering on front wheels (0 and 1)
-    const steerVal = steer * this.maxSteer;
+
+    // Speed-sensitive steering: full lock at low speed, calmer at high speed.
+    const speedFactor = THREE.MathUtils.clamp(this.speedKmh / 170, 0, 1);
+    const steerLimit = this.maxSteer * THREE.MathUtils.lerp(1.0, 0.5, speedFactor);
+    const steerVal = steer * steerLimit;
     this.vehicle.setSteeringValue(steerVal, 0);
     this.vehicle.setSteeringValue(steerVal, 1);
-    // Braking on all wheels
+
+    // Foot brake on all wheels.
     const b = brake * this.maxBrakeForce;
-    for (let i = 0; i < 4; i++) this.vehicle.setBrake(b, i);
+    this.vehicle.setBrake(b, 0);
+    this.vehicle.setBrake(b, 1);
+
+    if (handbrake) {
+      // Break rear traction → slides / drifts, with light rear braking.
+      this.vehicle.wheelInfos[2].frictionSlip = this.driftGrip;
+      this.vehicle.wheelInfos[3].frictionSlip = this.driftGrip;
+      this.vehicle.setBrake(b + this.maxBrakeForce * 0.35, 2);
+      this.vehicle.setBrake(b + this.maxBrakeForce * 0.35, 3);
+    } else {
+      this.vehicle.wheelInfos[2].frictionSlip = this.rearGrip;
+      this.vehicle.wheelInfos[3].frictionSlip = this.rearGrip;
+      this.vehicle.setBrake(b, 2);
+      this.vehicle.setBrake(b, 3);
+    }
   }
 
   get speedKmh() {
@@ -177,13 +278,10 @@ export class Car {
   }
 
   get forwardDir() {
-    const q = this.chassisBody.quaternion;
-    const f = new CANNON.Vec3(0, 0, 1);
-    const out = q.vmult(f);
+    const out = this.chassisBody.quaternion.vmult(new CANNON.Vec3(0, 0, 1));
     return new THREE.Vector3(out.x, out.y, out.z);
   }
 
-  // Flip the car back upright if it has rolled over.
   resetUpright() {
     const p = this.chassisBody.position;
     this.chassisBody.quaternion.setFromEuler(0, this._lastYaw ?? 0, 0);
@@ -193,21 +291,26 @@ export class Car {
   }
 
   syncMesh() {
-    const p = this.chassisBody.position;
-    const q = this.chassisBody.quaternion;
+    // Use interpolated transform for smooth rendering between physics steps.
+    const p = this.chassisBody.interpolatedPosition;
+    const q = this.chassisBody.interpolatedQuaternion;
     this.mesh.position.set(p.x, p.y, p.z);
     this.mesh.quaternion.set(q.x, q.y, q.z, q.w);
 
-    // Track yaw for upright reset.
     const e = new THREE.Euler().setFromQuaternion(this.mesh.quaternion, "YXZ");
     this._lastYaw = e.y;
 
+    // Wheels are children of the chassis group: set their local transforms.
     for (let i = 0; i < this.wheelMeshes.length; i++) {
-      this.vehicle.updateWheelTransform(i);
-      const t = this.vehicle.wheelInfos[i].worldTransform;
+      const info = this.vehicle.wheelInfos[i];
+      const cp = info.chassisConnectionPointLocal;
+      const susp = info.suspensionLength ?? info.suspensionRestLength ?? 0.3;
       const wm = this.wheelMeshes[i];
-      wm.position.set(t.position.x, t.position.y, t.position.z);
-      wm.quaternion.set(t.quaternion.x, t.quaternion.y, t.quaternion.z, t.quaternion.w);
+      wm.position.set(cp.x, cp.y - susp, cp.z);
+
+      const qSteer = new THREE.Quaternion().setFromAxisAngle(DIR_LOCAL, info.steering ?? 0);
+      const qSpin = new THREE.Quaternion().setFromAxisAngle(AXLE_LOCAL, info.rotation ?? 0);
+      wm.quaternion.copy(qSteer).multiply(qSpin);
     }
   }
 }
